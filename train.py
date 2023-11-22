@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import rembg
 from tqdm import tqdm
+import os
 
 from gs_renderer import Renderer, MiniCam
 from cam_utils import orbit_camera, OrbitCamera
@@ -55,6 +56,12 @@ class SplatModelTrainer:
         self.input_mask_torch = torch.from_numpy(self.input_mask).permute(2, 0, 1).unsqueeze(0).to(self.device)
         self.input_mask_torch = F.interpolate(self.input_mask_torch, (self.opt.ref_size, self.opt.ref_size), mode="bilinear", align_corners=False)
 
+        from guidance.zero123_utils import Zero123
+        self.guidance_zero123 = Zero123(self.device)
+
+        with torch.no_grad():
+            self.guidance_zero123.get_img_embeds(self.input_img_torch)
+
     def train_step(self):
         self.step += 1
         step_ratio = min(1, self.step / self.opt.iters)
@@ -73,7 +80,6 @@ class SplatModelTrainer:
 
         render_resolution = 128 if step_ratio < 0.3 else (256 if step_ratio < 0.6 else 512)
         images = []
-        poses = []
         vers, hors, radii = [], [], []
         min_ver = max(min(-30, -30 - self.opt.elevation), -80 - self.opt.elevation)
         max_ver = min(max(30, 30 - self.opt.elevation), 80 - self.opt.elevation)
@@ -88,7 +94,6 @@ class SplatModelTrainer:
             radii.append(radius)
 
             pose = orbit_camera(self.opt.elevation + ver, hor, self.opt.radius + radius)
-            poses.append(pose)
 
             cur_cam = MiniCam(pose, render_resolution, render_resolution, self.cam.fovy, self.cam.fovx, self.cam.near, self.cam.far)
 
@@ -99,19 +104,38 @@ class SplatModelTrainer:
             images.append(image)
         
         images = torch.cat(images, dim=0)
-        poses = torch.from_numpy(np.stack(poses, axis=0)).to(self.device)
+
+        loss = loss + self.opt.lambda_zero123 * self.guidance_zero123.train_step(images, vers, hors, radii, step_ratio=step_ratio if self.opt.anneal_timestep else None)
 
         loss.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+        if self.step >= self.opt.density_start_iter and self.step <= self.opt.density_end_iter:
+            viewspace_point_tensor, visibility_filter, radii = out["viewspace_points"], out["visibility_filter"], out["radii"]
+            self.renderer.gaussians.max_radii2D[visibility_filter] = torch.max(self.renderer.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+            self.renderer.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+            if self.step % self.opt.densification_interval == 0:
+                self.renderer.gaussians.densify_and_prune(self.opt.densify_grad_threshold, min_opacity=0.1, extent=4, max_screen_size=1)
+            
+            if self.step % self.opt.opacity_reset_interval == 0:
+                self.renderer.gaussians.reset_opacity()
+
         torch.cuda.synchronize()
     
     def train(self, iters):
         self.prepare_train()
         for _ in tqdm(range(iters)):
             self.train_step()
+        self.renderer.gaussians.prune(min_opacity=0.01, extent=1, max_screen_size=1)
         self.save_model()
     
     def save_model(self):
-        pass
+        os.makedirs(self.opt.outdir, exist_ok=True)
+        path = os.path.join(self.opt.outdir, self.opt.save_path + "_model.ply")
+        self.renderer.gaussians.save_ply(path)
+
 
 if __name__ == "__main__":
     import argparse
