@@ -1,3 +1,4 @@
+wheel
 tqdm
 rich
 ninja
@@ -25,13 +26,8 @@ diffusers == 0.21.4 # fix loading zero123 temporarily
 accelerate
 transformers
 
-# for dmtet and mesh export
-xatlas
-trimesh
-PyMCubes
-pymeshlab
-
 rembg[gpu,cli]
 
 # gradio demo
 gradio
+gradio_model3dgs
