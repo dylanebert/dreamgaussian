@@ -14,8 +14,6 @@ from diff_gaussian_rasterization import (
 from simple_knn._C import distCUDA2
 
 from sh_utils import eval_sh, SH2RGB, RGB2SH
-from mesh import Mesh
-from mesh_utils import decimate_mesh, clean_mesh
 
 import kiui
 
@@ -292,34 +290,6 @@ class GaussianModel:
         kiui.lo(occ, verbose=1)
 
         return occ
-    
-    def extract_mesh(self, path, density_thresh=1, resolution=128, decimate_target=1e5):
-
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-
-        occ = self.extract_fields(resolution).detach().cpu().numpy()
-
-        import mcubes
-        vertices, triangles = mcubes.marching_cubes(occ, density_thresh)
-        vertices = vertices / (resolution - 1.0) * 2 - 1
-
-        # transform back to the original space
-        vertices = vertices / self.scale + self.center.detach().cpu().numpy()
-
-        vertices, triangles = clean_mesh(vertices, triangles, remesh=True, remesh_size=0.015)
-        if decimate_target > 0 and triangles.shape[0] > decimate_target:
-            vertices, triangles = decimate_mesh(vertices, triangles, decimate_target)
-
-        v = torch.from_numpy(vertices.astype(np.float32)).contiguous().cuda()
-        f = torch.from_numpy(triangles.astype(np.int32)).contiguous().cuda()
-
-        print(
-            f"[INFO] marching cubes result: {v.shape} ({v.min().item()}-{v.max().item()}), {f.shape}"
-        )
-
-        mesh = Mesh(v=v, f=f, device='cuda')
-
-        return mesh
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
